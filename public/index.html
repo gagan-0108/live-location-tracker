@@ -1,0 +1,142 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Location Sharing Application</title>
+    <link
+      rel="stylesheet"
+      href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+      integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY="
+      crossorigin=""
+    />
+    <style>
+      #map {
+        height: 90vh;
+      }
+    </style>
+  </head>
+  <body>
+    <div style="padding: 10px; display: flex; justify-content: space-between; align-items: center; background: #f0f0f0;">
+      <h1 style="margin: 0; font-size: 1.2rem;">Live Location Tracker</h1>
+      <a href="/logout" style="text-decoration: none; color: white; background: red; padding: 5px 10px; border-radius: 5px;">Logout</a>
+    </div>
+    <div id="map"></div>
+    <script
+      src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+      integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
+      crossorigin=""
+    ></script>
+    <script src="/socket.io/socket.io.js"></script>
+
+    <script>
+      const socket = io();
+      const map = L.map('map').setView([20.5937, 78.9629], 5); // Default to India
+
+      const remoteMarkers = new Map();
+
+      socket.on('server:location:update', (data) => {
+        const { id, latitude, longitude, name } = data;
+        const TIMEOUT_DURATION = 120 * 1000; // 2 minutes
+
+        if (!remoteMarkers.has(id)) {
+          const marker = L.marker([latitude, longitude])
+            .addTo(map)
+            .bindPopup(name || id);
+
+          const timeoutId = setTimeout(() => {
+            marker.remove();
+            remoteMarkers.delete(id);
+            console.log(`Removed stale user: ${name || id}`);
+          }, TIMEOUT_DURATION);
+
+          remoteMarkers.set(id, { marker, timeoutId });
+        } else {
+          const userData = remoteMarkers.get(id);
+          userData.marker.setLatLng([latitude, longitude]);
+          
+          clearTimeout(userData.timeoutId);
+          userData.timeoutId = setTimeout(() => {
+            userData.marker.remove();
+            remoteMarkers.delete(id);
+            console.log(`Removed stale user: ${name || id}`);
+          }, TIMEOUT_DURATION);
+        }
+      });
+
+      socket.on('server:user:disconnect', (data) => {
+        const { id } = data;
+        if (remoteMarkers.has(id)) {
+          const userData = remoteMarkers.get(id);
+          clearTimeout(userData.timeoutId);
+          userData.marker.remove();
+          remoteMarkers.delete(id);
+        }
+      });
+
+      L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+        maxZoom: 19,
+        attribution:
+          '&copy; <a href="http://www.openstreetmap.org/copyright">OpenStreetMap</a>',
+      }).addTo(map);
+
+      function getUsersCurrentLocation() {
+        return new Promise((res, rej) => {
+          if ('geolocation' in navigator) {
+            navigator.geolocation.getCurrentPosition(
+              (position) => {
+                console.log(`Got user's location`, position);
+                const latitude = position.coords.latitude;
+                const longitude = position.coords.longitude;
+                res({ latitude, longitude });
+              },
+              (err) => {
+                rej(err);
+              },
+
+              { enableHighAccuracy: true },
+            );
+          } else {
+            alert('Geolocation is not available in this browser');
+          }
+        });
+      }
+
+      let myCurrentLocationMarker = null;
+      let lastSentLocation = { latitude: null, longitude: null };
+
+      async function main() {
+        const updateLocation = async () => {
+          try {
+            const { latitude, longitude } = await getUsersCurrentLocation();
+            
+            // Only emit if location has changed
+            if (latitude !== lastSentLocation.latitude || longitude !== lastSentLocation.longitude) {
+              socket.emit('client:location:update', { latitude, longitude });
+              lastSentLocation = { latitude, longitude };
+            }
+
+            if (!myCurrentLocationMarker) {
+              myCurrentLocationMarker = L.marker([latitude, longitude])
+                .addTo(map)
+                .bindPopup('You are here');
+              map.setView([latitude, longitude], 15); // Zoom into user's location
+            } else {
+              myCurrentLocationMarker.setLatLng([latitude, longitude]);
+            }
+          } catch (error) {
+            console.error('Failed to get location:', error);
+          }
+        };
+
+        // Call immediately
+        await updateLocation();
+
+        // Then set interval
+        setInterval(updateLocation, 10 * 1000);
+      }
+
+      window.addEventListener('load', main);
+    </script>
+  </body>
+</html>
